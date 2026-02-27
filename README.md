@@ -94,6 +94,86 @@ Then open:
 http://127.0.0.1:9005/docs
 ```
 
+
+## Quick Test (Using curl)
+
+### 1️⃣ Add Buy Trades
+
+```bash
+curl -X POST "http://127.0.0.1:9005/trades" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "symbol": "BTC",
+        "side": "buy",
+        "price": 40000,
+        "quantity": 1
+      }'
+```
+
+```bash
+curl -X POST "http://127.0.0.1:9005/trades" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "symbol": "BTC",
+        "side": "buy",
+        "price": 42000,
+        "quantity": 1
+      }'
+```
+
+---
+
+### 2️⃣ Add Sell Trade (FIFO enforced automatically)
+
+```bash
+curl -X POST "http://127.0.0.1:9005/trades" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "symbol": "BTC",
+        "side": "sell",
+        "price": 43000,
+        "quantity": 1.5
+      }'
+```
+
+---
+
+### 3️⃣ Check Portfolio
+
+```bash
+curl "http://127.0.0.1:9005/portfolio"
+```
+
+Expected output:
+
+```json
+{
+  "BTC": {
+    "quantity": 0.5,
+    "average_entry_price": 42000.0
+  }
+}
+```
+
+---
+
+### 4️⃣ Check PnL
+
+```bash
+curl "http://127.0.0.1:9005/pnl"
+```
+
+Example output:
+
+```json
+{
+  "realized_pnl": 3500.0,
+  "unrealized_pnl": 1000.0
+}
+```
+
+*(Unrealized PnL depends on the hardcoded latest price defined in `prices.py`.)*
+
 ---
 
 ## Features
