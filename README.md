@@ -1,12 +1,49 @@
-# Portfolio & PnL Tracker
+## Portfolio & PnL Tracker (FastAPI)
 
-A lightweight backend service that tracks trades, calculates portfolio positions, and computes realized and unrealized profit & loss (PnL).
+A lightweight FastAPI backend that tracks trades, maintains portfolio positions, and computes realized and unrealized profit & loss (PnL) using **FIFO accounting**.
+
+The service is intentionally **stateless and in-memory**, focused on correctness and clarity rather than persistence or scaling concerns.
 
 ---
 
-## Running Locally
+## Tech Stack
 
-Docker build:
+- **Language**: Python (3.13, as used in Docker image)
+- **Framework**: FastAPI
+- **Server**: Uvicorn
+- **Data models**: `dataclasses` + Pydantic
+- **Testing**: `pytest` + `fastapi.testclient`
+- **Dependency / runtime tool**: `uv` (via `pyproject.toml` + `uv.lock`)
+
+---
+
+## Project Structure
+
+```text
+.
+├── main.py                # FastAPI app + router wiring + health endpoint
+├── app
+│   ├── engine.py          # In‑memory portfolio engine and FIFO PnL logic
+│   ├── models.py          # Pydantic request models
+│   ├── routes.py          # API routes using a shared PortfolioEngine instance
+│   └── prices.py          # Hardcoded latest prices used for unrealized PnL
+├── tests
+│   ├── conftest.py        # Test client + engine reset fixture
+│   └── test_portfolio.py  # End‑to‑end tests for trades, portfolio, PnL
+├── pyproject.toml         # Dependencies (FastAPI, Uvicorn, pytest, etc.)
+├── uv.lock                # Resolved lockfile for `uv`
+└── Dockerfile             # Production image using `uv` + Uvicorn
+```
+
+---
+
+## Running the Service
+
+You can run the API either **with Docker** (recommended for a quick spin‑up) or **directly with `uv`**.
+
+### 1. With Docker (recommended)
+
+Build the image:
 
 ```bash
 cd trade-fox-challenge
@@ -21,46 +58,79 @@ docker run -it --rm --name trade-api -p 9005:9005 trade-api:latest
 
 Open Swagger UI:
 
+```text
+http://127.0.0.1:9005/docs
 ```
+
+Health / readiness endpoint:
+
+```text
+GET /ready  -> { "status": "running" }
+```
+
+### 2. Locally with `uv` (no Docker)
+
+Prerequisites:
+
+- Python 3.13 installed
+- [`uv`](https://github.com/astral-sh/uv) available on your PATH
+
+Install dependencies:
+
+```bash
+cd trade-fox-challenge
+uv sync
+```
+
+Run the API locally:
+
+```bash
+uv run uvicorn main:app --host 0.0.0.0 --port 9005
+```
+
+Then open:
+
+```text
 http://127.0.0.1:9005/docs
 ```
 
 ---
 
-
 ## Features
 
-- Add trades (buy/sell)
-- FIFO accounting enforced internally
-- Portfolio summary per symbol
-- Realized PnL
-- Unrealized PnL (based on hardcoded latest prices)
-- In-memory storage (single user)
-- Unit tests covering edge cases
+- **Trade capture**: Add `buy` and `sell` trades per symbol
+- **FIFO accounting**: Sells are matched against the **oldest open buys**
+- **Portfolio view**: Quantity and average entry price per symbol
+- **PnL reporting**:
+  - Realized PnL from closed positions
+  - Unrealized PnL from remaining open quantities using latest prices
+- **In-memory engine**: Single-process, single-user, non-persistent
+- **Test coverage**: Edge cases around FIFO behavior and validation
 
 ---
 
 ## Accounting Method
 
-This implementation uses **FIFO (First-In-First-Out)** accounting.
+This implementation uses **FIFO (First-In-First-Out)** accounting on a per-symbol basis.
 
-- Each **buy trade** is recorded as a trade transaction.
-- When a sell is executed, the engine automatically links it to the oldest open buy-trades.
-- If a sell spans multiple buys, the engine internally splits it into multiple sell transactions referencing those buy-trade IDs.
-- Sell-to-buy linkage is stored explicitly for traceability.
-- No derived financial state (like stored positions or PnL totals) is permanently stored.
+- Each **buy trade** is recorded as a standalone transaction.
+- Each **sell trade** is internally expanded into one or more sell records that:
+  - Reference specific buy trade IDs via a `reference_id` field.
+  - Consume quantity starting from the **oldest** open buy (FIFO).
+- Remaining quantity on each buy is computed by subtracting all linked sells.
+- No derived state (positions or PnL aggregates) is stored; it is **recomputed on demand** from the trade list.
 
-This ensures deterministic and correct realized and unrealized PnL.
+This design keeps PnL **deterministic, auditable, and easy to reason about**.
 
 ---
 
 ## API Endpoints
 
-### POST /trades
+### `POST /trades`
 
 Add a trade.
 
-Request body:
+Request body (Pydantic model: `TradeRequest`):
 
 ```json
 {
@@ -71,14 +141,21 @@ Request body:
 }
 ```
 
-- `side` must be `"buy"` or `"sell"`.
-- Sell orders automatically match the oldest open buy trades (FIFO).
+- **side**: `"buy"` or `"sell"` (anything else is rejected with `400` / `422`).
+- **Sell behavior**:
+  - Matches against the oldest open buys (FIFO).
+  - If the requested sell quantity is greater than the available position, returns **HTTP 400** with `"Not enough quantity to sell"`.
+  - Selling without any holdings also returns **HTTP 400**.
 
----
+Successful response:
 
-### GET /portfolio
+```json
+{ "status": "ok" }
+```
 
-Returns current holdings per symbol:
+### `GET /portfolio`
+
+Returns the current open positions per symbol:
 
 ```json
 {
@@ -89,30 +166,58 @@ Returns current holdings per symbol:
 }
 ```
 
-- `quantity` = total remaining open quantity
-- `average_entry_price` = weighted average of remaining buy trades
+- **quantity**: Total remaining open quantity after consumes from sells.
+- **average_entry_price**: Weighted average price of the remaining open buys.
+- If there are no open positions, returns an empty object: `{}`.
 
----
+### `GET /pnl`
 
-### GET /pnl
-
-Returns:
+Returns portfolio PnL:
 
 ```json
 {
-  "realized_pnl": 3500,
-  "unrealized_pnl": 2000
+  "realized_pnl": 3500.0,
+  "unrealized_pnl": 2000.0
 }
 ```
 
-- **Realized PnL**: profit/loss from closed trades
-- **Unrealized PnL**: profit/loss from remaining open quantities using hardcoded latest prices
+- **Realized PnL**:
+  - Sum over all sells: \((sell\_price - buy\_price) * matched\_quantity\).
+  - Uses the `reference_id` linkage to the original buy trades.
+- **Unrealized PnL**:
+  - Computed only on remaining open quantities.
+  - Uses latest prices from `app/prices.py`:
 
-Latest prices are defined in `prices.py`.
+    ```python
+    LATEST_PRICES = {
+        "BTC": 40000,
+        "ETH": 2000,
+    }
+    ```
+
+  - Symbols not present in `LATEST_PRICES` are effectively priced at `0` for unrealized PnL.
+
+### `GET /ready`
+
+Simple liveness / readiness check provided by `main.py`:
+
+```json
+{ "status": "running" }
+```
+
+### Error Handling
+
+- Unexpected server errors are caught by a generic exception handler and surfaced as:
+
+  ```json
+  { "detail": "Internal Server Error" }
+  ```
+
+- FastAPI / Pydantic validation errors (missing fields, wrong types, invalid enum values) are returned as standard **422** responses.
 
 ---
 
-## Example Flow
+## Example FIFO Flow
 
 1. Buy 1 BTC @ 40,000  
 2. Buy 1 BTC @ 42,000  
@@ -120,52 +225,67 @@ Latest prices are defined in `prices.py`.
 
 FIFO behavior:
 
-- 1 BTC sold from the 40,000 buy
+- 1.0 BTC sold from the 40,000 buy
 - 0.5 BTC sold from the 42,000 buy
 
 Realized PnL:
 
-```
-(43000 - 40000)*1
-+ (43000 - 42000)*0.5
+```text
+(43000 - 40000) * 1.0
++ (43000 - 42000) * 0.5
 = 3500
 ```
 
 Remaining position:
 
-```
+```text
 0.5 BTC @ 42000
 ```
 
 ---
 
-
 ## Running Tests
 
+### Inside Docker
+
+With the container image already built:
+
 ```bash
-docker run -it --rm --name trade-api trade-api:latest uv run pytest -s -v tests/
+docker run -it --rm --name trade-api-test trade-api:latest uv run pytest -s -v tests/
 ```
 
-Tests cover:
+### Locally with `uv`
 
-- Multiple buys
-- FIFO sell behavior
-- Partial sell across multiple buys
-- Full position closure
-- Multiple symbols
-- Selling more than holdings
-- PnL correctness
+From the project root:
+
+```bash
+uv run pytest -s -v tests/
+```
+
+The tests cover:
+
+- Multiple buys and weighted average pricing
+- FIFO sell behavior across one or many buy lots
+- Partial sells that span multiple buys
+- Full position closure (portfolio becomes `{}`)
+- Multiple symbols with independent positions
+- Selling **more than holdings** (returns HTTP 400)
+- Selling without any holdings (returns HTTP 400)
+- Input validation for invalid `side` and missing fields
 
 ---
 
-## Assumptions
+## Assumptions & Limitations
 
-- Single user system
-- In-memory storage only
-- No authentication
-- No persistence across restarts
-- Hardcoded latest prices
-- No concurrency handling
+- **Single user / session**:
+  - All trades are stored in a single in-memory `PortfolioEngine` instance.
+- **In-memory only**:
+  - No database or persistence layer; state is lost on process restart.
+- **No authentication / authorization**.
+- **No concurrency guarantees**:
+  - Not designed for high-concurrency workloads or multiple workers.
+- **Hardcoded prices**:
+  - Latest prices live in `app/prices.py` and must be updated in code.
 
 ---
 
@@ -173,9 +293,9 @@ Tests cover:
 
 This implementation prioritizes:
 
-- Correct FIFO trade matching
-- Deterministic PnL calculation
-- Clear separation of concerns
-- Simple and maintainable design
+- **Correct FIFO trade matching**
+- **Deterministic PnL calculation**
+- **Auditability of trade → PnL linkage**
+- **Simple, maintainable architecture**
 
-The focus is correctness and clarity rather than over-engineering.
+It is intentionally minimal but provides a solid foundation for a more full-featured portfolio and PnL service.
