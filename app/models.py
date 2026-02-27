@@ -7,8 +7,4 @@ class TradeRequest(BaseModel):
     side: Literal["buy", "sell"]
     price: float
     quantity: float
-
-
-class PnLResponse(BaseModel):
-    realized_pnl: float
-    unrealized_pnl: float
+    
