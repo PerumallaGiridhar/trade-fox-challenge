@@ -3,4 +3,4 @@ WORKDIR /app
 COPY uv.lock pyproject.toml ./
 RUN uv sync
 COPY . .
-CMD ["uv", "run", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["uv", "run", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "9005"]
