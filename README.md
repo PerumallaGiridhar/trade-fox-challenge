@@ -168,7 +168,7 @@ Example output:
 ```json
 {
   "realized_pnl": 3500.0,
-  "unrealized_pnl": 1000.0
+  "unrealized_pnl": -1000.0
 }
 ```
 
